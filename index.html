@@ -23,15 +23,15 @@
   <div class="container">
     <h2>Escolha sua cor</h2>
 
-    <label for="nome">Nome</label>
-    <input id="nome" type="text" placeholder="Digite seu nome" />
+  <label for="nome">Nome</label>
+  <input id="nome" type="text" placeholder="Digite seu nome ou nome do casal" />
+  <div id="help-nome" style="font-size:12px;color:#666;margin-top:6px;font-style:italic">(casais usam a mesma cor)</div>
 
     <label for="cor">Cor</label>
     <select id="cor"><option value="">-- Escolha uma cor --</option></select>
 
     <button id="salvar" type="button">Salvar</button>
     <div id="mensagem" class="mensagem"></div>
-
     <div class="ocupadas">
       <strong>Cores ocupadas:</strong>
       <div id="lista-ocupadas"></div>
@@ -41,8 +41,9 @@
   <!-- Firebase SDKs -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/9.22.2/firebase-app.js";
-    import { getAnalytics } from "https://www.gstatic.com/firebasejs/9.22.2/firebase-analytics.js";
-    import { getDatabase, ref, onValue, child, get, set } from "https://www.gstatic.com/firebasejs/9.22.2/firebase-database.js";
+  import { getAnalytics } from "https://www.gstatic.com/firebasejs/9.22.2/firebase-analytics.js";
+  import { getDatabase, ref, onValue, child, get, set } from "https://www.gstatic.com/firebasejs/9.22.2/firebase-database.js";
+  import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/9.22.2/firebase-auth.js";
 
     // 🔥 Seu Firebase config
     const firebaseConfig = {
@@ -58,8 +59,41 @@
 
     // Inicializa Firebase
     const app = initializeApp(firebaseConfig);
-    const analytics = getAnalytics(app);
+    let analytics = null;
+    try {
+      analytics = getAnalytics(app);
+    } catch (e) {
+      console.warn('Analytics init failed:', e);
+    }
     const db = getDatabase(app);
+    const auth = getAuth(app);
+    let authed = false;
+
+    // tenta login anônimo automaticamente — muitas regras permitem usuários autenticados
+    async function ensureAnonymousAuth() {
+      if (auth.currentUser) {
+        authed = true;
+        return auth.currentUser;
+      }
+      try {
+        const cred = await signInAnonymously(auth);
+        authed = true;
+        console.log('Autenticado anonimamente:', cred.user.uid);
+        return cred.user;
+      } catch (e) {
+        console.warn('Não foi possível autenticar anonimamente:', e);
+        authed = false;
+        throw e;
+      }
+    }
+
+    onAuthStateChanged(auth, user => {
+      authed = !!user;
+      console.log('Auth state changed, authed=', authed, user && user.uid);
+    });
+
+    // tenta autenticar em background (não bloqueia render)
+    ensureAnonymousAuth().catch(() => {});
 
     // Lista de 13 cores
     const CORES = [
@@ -70,12 +104,16 @@
       { id: "roxo",        label: "Roxo",        hex: "#9b59b6" },
       { id: "laranja",     label: "Laranja",     hex: "#e67e22" },
       { id: "rosa",        label: "Rosa",        hex: "#fd79a8" },
+      { id: "rosa-claro",  label: "Rosa claro",  hex: "#ffb6c1" },
+      { id: "bege",        label: "Bege",        hex: "#f5f5dc" },
+      { id: "ciano",       label: "Ciano",       hex: "#00ffff" },
       { id: "marrom",      label: "Marrom",      hex: "#8e5c42" },
       { id: "cinza",       label: "Cinza",       hex: "#7f8c8d" },
       { id: "preto",       label: "Preto",       hex: "#2c3e50" },
       { id: "branco",      label: "Branco",      hex: "#ecf0f1" },
       { id: "verde-escuro", label: "Verde escuro", hex: "#006400" },
-      { id: "azul-escuro",  label: "Azul escuro",  hex: "#00008B" }
+      { id: "azul-escuro",  label: "Azul escuro",  hex: "#00008B" },
+      { id: "arco-iris",    label: "Arco-íris",    hex: "rainbow" }
     ];
 
     const selectCor = document.getElementById("cor");
@@ -89,6 +127,7 @@
       CORES.forEach(c => {
         const opt = document.createElement("option");
         opt.value = c.id;
+        // label + unavailable marker
         opt.textContent = c.label + (ocupadas[c.id] ? " (Indisponível)" : "");
         if (ocupadas[c.id]) opt.disabled = true;
         selectCor.appendChild(opt);
@@ -108,22 +147,92 @@
         linha.className = "linha";
         const sw = document.createElement("div");
         sw.className = "swatch";
-        sw.style.background = info ? info.hex : "#ccc";
+        // suporte a swatch arco-íris (gradiente)
+        if (info && info.hex === 'rainbow') {
+          sw.style.backgroundImage = 'linear-gradient(45deg, red, orange, yellow, green, blue, indigo, violet)';
+        } else {
+          sw.style.background = info ? info.hex : "#ccc";
+        }
         const txt = document.createElement("div");
-        txt.textContent = (info ? info.label : k) + " - " + ocupadas[k];
+        // mostra label da cor e abaixo o nome de quem selecionou
+        const label = document.createElement('div');
+        label.textContent = info ? info.label : k;
+        label.style.fontWeight = '600';
+        const who = document.createElement('div');
+        who.textContent = ocupadas[k];
+        who.style.fontSize = '13px';
+        who.style.color = '#222';
+        who.style.marginTop = '2px';
+        txt.appendChild(label);
+        txt.appendChild(who);
         linha.appendChild(sw);
         linha.appendChild(txt);
         listaOcupadas.appendChild(linha);
       });
     }
 
-    // 🔄 Atualiza em tempo real
-    const ocupadasRef = ref(db, "coresOcupadas");
-    onValue(ocupadasRef, snapshot => {
-      const ocupadas = snapshot.val() || {};
-      renderOptions(ocupadas);
-      renderOcupadasList(ocupadas);
-    });
+    // Rendera opções a partir da lista local de CORES (serão atualizadas quando ler /selecoes)
+    renderOptions({});
+
+    // mapa de ocupadas: { colorId: nome }
+    let ocupadas = {};
+
+    // computa ocupadas a partir de entradas em /selecoes (primeiro ts vence)
+    function computeOcupadasFromSelecoes(entries) {
+      const map = {};
+      Object.keys(entries || {}).forEach(k => {
+        const e = entries[k];
+        if (!e || !e.cor) return;
+        const cor = e.cor;
+        const ts = typeof e.ts === 'number' ? e.ts : (e.ts ? Number(e.ts) : Date.now());
+        if (!map[cor] || ts < map[cor].ts) {
+          map[cor] = { nome: e.nome || '—', ts };
+        }
+      });
+      // convert to simple name map for renderOptions
+      const simple = {};
+      Object.keys(map).forEach(c => simple[c] = map[c].nome);
+      return { detailed: map, simple };
+    }
+
+    async function attachSelecoesListener() {
+      try {
+        const selecoesRef = ref(db, 'selecoes');
+        onValue(selecoesRef, snapshot => {
+          const data = snapshot.val() || {};
+          const { detailed, simple } = computeOcupadasFromSelecoes(data);
+          ocupadas = simple;
+          renderOptions(ocupadas);
+          renderOcupadasList(ocupadas);
+        }, async (err) => {
+          console.warn('Erro ao escutar /selecoes:', err);
+          // tenta fallback REST
+          try {
+            const base = firebaseConfig.databaseURL.replace(/\/$/, '');
+            const url = base + '/selecoes.json';
+            const resp = await fetch(url);
+            if (resp.ok) {
+              const data = await resp.json() || {};
+              const { detailed, simple } = computeOcupadasFromSelecoes(data);
+              ocupadas = simple;
+              renderOptions(ocupadas);
+              renderOcupadasList(ocupadas);
+              return;
+            }
+          } catch (e) {
+            console.warn('REST fallback /selecoes falhou:', e);
+          }
+          // se tudo falhar, mantém as opções habilitadas
+          ocupadas = {};
+          renderOptions(ocupadas);
+          renderOcupadasList(ocupadas);
+        });
+      } catch (e) {
+        console.warn('Não foi possível anexar listener /selecoes:', e);
+      }
+    }
+
+    attachSelecoesListener();
 
     // Clique salvar
     btnSalvar.addEventListener("click", async () => {
@@ -142,16 +251,53 @@
         return;
       }
 
-      const snapshot = await get(child(ref(db), "coresOcupadas/" + cor));
-      if (snapshot.exists()) {
-        mensagem.textContent = "Essa cor já está ocupada!";
-        mensagem.classList.add("erro");
-      } else {
-        await set(ref(db, "coresOcupadas/" + cor), nome);
-        mensagem.textContent = "Cor salva com sucesso!";
+      // verifica se a cor já está ocupada localmente
+      if (ocupadas[cor]) {
+        mensagem.textContent = 'Essa cor já foi selecionada por: ' + ocupadas[cor];
+        mensagem.classList.add('erro');
+        return;
+      }
+
+      // registra a seleção em selecoes/<timestamp> sem bloquear a cor
+      const ts = Date.now();
+      const caminho = 'selecoes/' + ts;
+      const payload = { nome, cor, ts };
+      try {
+        // garante autenticação anônima antes de usar SDK set
+        try {
+          await ensureAnonymousAuth();
+        } catch (authErr) {
+          console.warn('Auth anônimo não disponível, continuará com REST fallback');
+        }
+
+        // tenta usar SDK set se estiver autenticado
+        if (authed) {
+          await set(ref(db, caminho), payload);
+        } else {
+          // se não autenticado, tenta REST PUT (pode falhar com 401)
+          const base = firebaseConfig.databaseURL.replace(/\/$/, '');
+          const url = base + '/' + caminho + '.json';
+          const resp = await fetch(url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        }
+
+        mensagem.textContent = "Seleção registrada!";
         mensagem.classList.add("sucesso");
         nomeInput.value = "";
         selectCor.value = "";
+      } catch (err) {
+        console.error('Erro ao salvar seleção:', err);
+        // mais contexto para o usuário
+        if (err && String(err).includes('401')) {
+          mensagem.textContent = 'Falha ao salvar: sem permissão (401). Verifique as regras do Firebase.';
+        } else {
+          mensagem.textContent = 'Falha ao salvar. Talvez sem permissão ou sem conexão.';
+        }
+        mensagem.classList.add('erro');
       }
     });
   </script>
